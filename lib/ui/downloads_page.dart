@@ -314,11 +314,148 @@ class _DownloadsPageState extends State<DownloadsPage>
                 ),
                 child: _selectionActions(),
               ),
+            if (!_selecting) _clearHistoryOption(all.length),
           ],
         ),
       );
     },
   );
+
+  Widget _clearHistoryOption(int count) {
+    final enabled = count > 0 && !_batching;
+    final danger = const Color(0xffff3b30);
+    return Container(
+      key: const Key('downloads-clear-history'),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: border(context), width: .5)),
+      ),
+      padding: EdgeInsets.only(bottom: MediaQuery.paddingOf(context).bottom),
+      child: InkWell(
+        onTap: enabled ? _clearHistoryDialog : null,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 9, 16, 9),
+          child: Row(
+            children: [
+              Icon(
+                CupertinoIcons.trash,
+                size: 17,
+                color: enabled ? danger : secondary(context),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  count > 0 ? '清除全部下载记录（共 $count 条）' : '清除全部下载记录',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: enabled ? danger : secondary(context),
+                  ),
+                ),
+              ),
+              Text(
+                '清除缓存',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: enabled ? danger : secondary(context),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _clearHistoryDialog() async {
+    final manager = widget.services.downloads;
+    final tasks = manager.tasks;
+    if (_batching || tasks.isEmpty) return;
+    final count = tasks.length;
+    final active = tasks.where((task) => task.active).length;
+    final exported = tasks.where((task) => task.savedPath != null).length;
+    var deleteFiles = false;
+    final scope = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('清除全部下载记录'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '将清除全部 $count 条下载记录'
+                  '${active > 0 ? '（其中 $active 个进行中的任务会先停止）' : ''}。',
+                ),
+                const SizedBox(height: 12),
+                const Text('未完成的任务缓存会一并清理；已下载到本地的文件默认保留。'),
+                if (exported > 0)
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('同时删除已下载的文件（$exported 个）'),
+                    value: deleteFiles,
+                    onChanged: (value) =>
+                        setLocal(() => deleteFiles = value ?? false),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('继续'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (scope != true || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认清除？'),
+        content: Text(
+          deleteFiles
+              ? '将删除全部 $count 条下载记录和已下载的文件，此操作不可撤销。'
+              : '将删除全部 $count 条下载记录，此操作不可撤销。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('downloads-confirm-clear-all'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text(
+              '清除',
+              style: TextStyle(color: Colors.red),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final removed = await busy<int>(
+      context,
+      () => manager.clearAllHistory(deleteFiles: deleteFiles),
+      label: '正在清除 $count 条记录…',
+    );
+    if (!mounted || removed == null) return;
+    setState(() {
+      _selected.clear();
+      _selecting = false;
+      _selectionNotice = null;
+    });
+    message(context, '已清除 $removed 条下载记录');
+  }
 
   Widget _shutdownOption() {
     final shutdown = widget.services.downloadShutdown;

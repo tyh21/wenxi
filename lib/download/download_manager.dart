@@ -1237,6 +1237,58 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  /// One-shot reset behind the "clear all" entry on the downloads page. Stops
+  /// active writers, commits every removal in a single state save, then lets
+  /// the background queues drain native rows and task caches.
+  Future<int> clearAllHistory({bool deleteFiles = false}) =>
+      _pumpGate.run(() async {
+        require(!_closing, '应用正在退出');
+        final tasks = _tasks.values.toList(growable: false);
+        if (tasks.isEmpty) return 0;
+        require(
+          !tasks.any((task) => _playbackHolds.containsKey(task.id)),
+          '请先关闭正在播放的任务，再清除全部记录',
+        );
+        for (final task in tasks.where((task) => task.active)) {
+          _running[task.id]?.stop();
+          _tasks[task.id] = task.update({
+            'status': 'paused',
+            'speed': 0,
+            'phase': '',
+          });
+        }
+        await Future.wait([
+          for (final id in _tasks.keys.toList(growable: false))
+            if (_running.containsKey(id)) _control(id, () => _stop(id)),
+        ]);
+        if (deleteFiles) {
+          for (final task in tasks) {
+            await files.delete(task.savedPath);
+          }
+        }
+        await _persist(
+          removedDownloads: tasks
+              .map((task) => task.id)
+              .toList(growable: false),
+          removedCleanups: tasks
+              .map((task) => task.spec.cleanup)
+              .toList(growable: false),
+        );
+        for (final task in tasks) {
+          _tasks.remove(task.id);
+          _guestDownloadBatches.remove(task.id);
+          _interrupted.remove(task.id);
+        }
+        DiagnosticLog.event(
+          'download.history_cleared',
+          fields: {'count': tasks.length},
+        );
+        notifyListeners();
+        _background(_drainRemovedDownloads());
+        _background(cleanups.drain());
+        return tasks.length;
+      });
+
   Future<void> delete(String id, {bool deleteFile = false}) =>
       _control(id, () async {
         _interrupted.remove(id);
